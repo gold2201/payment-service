@@ -15,6 +15,7 @@ class PaymentStatus(StrEnum):
 
 class OutboxStatus(StrEnum):
     PENDING = "pending"
+    PROCESSING = "processing"
     PUBLISHED = "published"
     FAILED = "failed"
 
@@ -22,6 +23,7 @@ class OutboxStatus(StrEnum):
 class ProcessingState(StrEnum):
     NOT_FOUND = "not_found"
     ALREADY_PROCESSED = "already_processed"
+    IN_PROGRESS = "in_progress"
     PROCESSED = "processed"
 
 

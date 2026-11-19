@@ -30,34 +30,62 @@ class PaymentProcessingService:
         self._uow = UnitOfWork(session)
 
     async def process_payment_created(self, payment_id: UUID) -> PaymentProcessingResult:
-        payment = await self._uow.payments.get(payment_id)
-        if payment is None:
-            logger.warning("Payment not found: id=%s", payment_id)
-            return PaymentProcessingResult(payment_id=payment_id, state=ProcessingState.NOT_FOUND)
+        async with self._uow:
+            claimed = await self._uow.payments.claim_for_processing(payment_id)
 
-        if payment.processed_at is not None:
-            logger.info("Payment already processed: id=%s", payment_id)
-            return _build_result(payment, ProcessingState.ALREADY_PROCESSED)
+            if claimed is None:
+                current = await self._uow.payments.get(payment_id)
+                await self._uow.commit()
 
-        await self._uow.commit()
+                if current is None:
+                    logger.warning("Payment not found: id=%s", payment_id)
+                    return PaymentProcessingResult(
+                        payment_id=payment_id,
+                        state=ProcessingState.NOT_FOUND,
+                    )
 
+                if current.processed_at is None:
+                    logger.warning(
+                        "Payment is claimed but not finalized yet: id=%s started_at=%s",
+                        payment_id,
+                        current.processing_started_at,
+                    )
+                    return PaymentProcessingResult(
+                        payment_id=payment_id,
+                        state=ProcessingState.IN_PROGRESS,
+                    )
+
+                logger.info(
+                    "Payment already processed: id=%s processed_at=%s",
+                    payment_id,
+                    current.processed_at,
+                )
+                return _build_result(current, ProcessingState.ALREADY_PROCESSED)
+
+            await self._uow.commit()
+
+        logger.info("Calling gateway: payment_id=%s", payment_id)
         new_status = await _simulate_gateway()
 
-        payment = await self._uow.payments.get_by_id_for_update(payment_id)
-        if payment is None:
-            logger.warning("Payment disappeared during processing: id=%s", payment_id)
-            return PaymentProcessingResult(payment_id=payment_id, state=ProcessingState.NOT_FOUND)
-
-        if payment.processed_at is not None:
+        async with self._uow:
+            finalized = await self._uow.payments.finalize_processing(payment_id, new_status)
             await self._uow.commit()
-            logger.info("Payment processed concurrently: id=%s", payment_id)
-            return _build_result(payment, ProcessingState.ALREADY_PROCESSED)
 
-        await self._uow.payments.update_status(payment, new_status)
-        await self._uow.commit()
+        if finalized is None:
+            logger.warning("Finalize lost race, another worker finalized: id=%s", payment_id)
+            async with self._uow:
+                current = await self._uow.payments.get(payment_id)
+                await self._uow.commit()
 
-        logger.info("Payment processed: id=%s status=%s", payment.payment_id, str(new_status))
-        return _build_result(payment, ProcessingState.PROCESSED)
+            if current is None:
+                return PaymentProcessingResult(
+                    payment_id=payment_id,
+                    state=ProcessingState.NOT_FOUND,
+                )
+            return _build_result(current, ProcessingState.ALREADY_PROCESSED)
+
+        logger.info("Payment processed: id=%s status=%s", payment_id, str(new_status))
+        return _build_result(finalized, ProcessingState.PROCESSED)
 
 
 def _build_result(payment: Payment, state: ProcessingState) -> PaymentProcessingResult:

@@ -45,8 +45,17 @@ async def handle_payment_created(message: dict[str, Any], msg: RabbitMessage) ->
                 payment_id=payment_id,
             )
 
-        if result.state == ProcessingState.NOT_FOUND:
-            logger.warning("Payment not found, ack and drop: id=%s", payment_id)
+        if result.state == ProcessingState.IN_PROGRESS:
+            logger.warning(
+                "Payment is still in progress, scheduling retry: id=%s (attempt %s)",
+                payment_id,
+                attempt,
+            )
+            await _retry_or_dead_letter(msg, message, payment_id=payment_id, attempt=attempt)
+            return
+
+        if result.state in (ProcessingState.NOT_FOUND, ProcessingState.ALREADY_PROCESSED):
+            logger.info("Skip webhook: state=%s id=%s", result.state, payment_id)
             await msg.ack()
             return
 
